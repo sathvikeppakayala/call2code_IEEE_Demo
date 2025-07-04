@@ -1,0 +1,109 @@
+import re
+import mysql.connector
+from datetime import datetime
+import json
+
+# ========== CONFIGURATION ==========
+MYSQL_CONFIG = {
+    'host': '35.183.120.229',
+    'user': 'app_user',
+    'password': 'ap',
+    'database': 'ap'
+}
+
+# ========== CREATE TABLE IF NOT EXISTS ==========
+def create_json_table(conn):
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS json_entities_onlyblob (
+                data JSON
+            )
+        """)
+        conn.commit()
+        cursor.close()
+        print("✅ Table 'json_entities_onlyblob' ensured.")
+    except Exception as e:
+        print(f"❌ Table creation failed: {e}")
+
+# ========== ENTITY EXTRACTION ==========
+def extract_entities(message: str, date_str: str):
+    results = []
+    print(f"🔍 Processing message: {message}")
+
+    # Phone Numbers
+    phones = re.findall(r'\b[6-9]\d{9}\b', message)
+    for num in phones:
+        results.append({"type": "phone", "value": num, "name": "Unknown", "date": date_str})
+
+    # Bank Account Numbers
+    accounts = re.findall(r'\b\d{11,16}\b', message)
+    for acc in accounts:
+        results.append({"type": "account", "value": acc, "name": "Unknown", "date": date_str})
+
+    # UPI IDs
+    upis = re.findall(r'\b[\w\.-]+@[\w]+\b', message)
+    for upi in upis:
+        if not upi.lower().endswith(("gmail.com", "yahoo.com", "outlook.com")):
+            results.append({"type": "upi", "value": upi, "name": "Unknown", "date": date_str})
+
+    # Meta handles (@usernames)
+    handles = re.findall(r'(?<!\w)@\w{4,}(?!\.\w+)', message)
+    for handle in handles:
+        results.append({"type": "meta", "value": handle, "name": "Unknown", "date": date_str})
+
+    if "facebook.com" in message.lower():
+        results.append({"type": "meta", "value": "facebook.com", "name": "Unknown", "date": date_str})
+
+    return results
+
+# ========== INSERT FINAL JSON BLOB ==========
+def insert_json_blob(conn, entities):
+    try:
+        cursor = conn.cursor()
+        json_blob = json.dumps(entities)
+        cursor.execute("INSERT INTO json_entities_onlyblob (data) VALUES (%s)", (json_blob,))
+        conn.commit()
+        cursor.close()
+        print("✅ JSON blob inserted into json_entities_onlyblob table.")
+    except Exception as e:
+        print(f"❌ Failed to insert JSON blob: {e}")
+
+# ========== PROCESS DATABASE ==========
+def generate_json_from_messages():
+    try:
+        conn = mysql.connector.connect(**MYSQL_CONFIG)
+        create_json_table(conn)
+
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT message_text, timestamp
+            FROM decoy_chat
+            WHERE flags_raised = 1
+        """)
+        rows = cursor.fetchall()
+
+        all_entities = []
+
+        for message_text, timestamp in rows:
+            if not message_text:
+                continue
+            date_str = timestamp.strftime("%Y-%m-%d") if isinstance(timestamp, datetime) else str(timestamp)[:10]
+            extracted = extract_entities(message_text, date_str)
+            all_entities.extend(extracted)
+
+        if all_entities:
+            insert_json_blob(conn, all_entities)
+
+        print("\n📤 Final JSON Output:")
+        print(json.dumps(all_entities, indent=4))
+
+        cursor.close()
+        conn.close()
+
+    except Exception as e:
+        print(f"❌ Database Error: {e}")
+
+# ========== MAIN ==========
+if _name_ == "_main_":
+    generate_json_from_messages()
